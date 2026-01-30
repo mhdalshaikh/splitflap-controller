@@ -71,6 +71,7 @@ void setup() {
   Serial.println("  P<num> - Go to position number (e.g., P5)");
   Serial.println("  S - Show current status");
   Serial.println("  T - Test motor (one full revolution)");
+  Serial.println("  M - Test max speed (find optimal delay)");
   Serial.println();
 
   // Auto-home on startup
@@ -115,6 +116,11 @@ void loop() {
       case 'T':
       case 't':
         testMotor();
+        break;
+
+      case 'M':
+      case 'm':
+        testMaxSpeed();
         break;
 
       case '\n':
@@ -212,6 +218,69 @@ void testMotor() {
   moveSteps(STEPS_PER_REVOLUTION);
   motorOff();
   Serial.println("Test complete.");
+}
+
+/**
+ * Test maximum speed by gradually decreasing delay
+ * Runs 200 steps at each speed level, starting slow and getting faster
+ */
+void testMaxSpeed() {
+  Serial.println("=== Max Speed Test ===");
+  Serial.println("Testing speeds from 10ms down to 1ms delay");
+  Serial.println("Watch/listen for when motor starts skipping or stalling");
+  Serial.println();
+
+  int testSteps = 200;  // Steps to run at each speed
+
+  // Test delays from 10ms down to 1ms
+  for (int testDelay = 10; testDelay >= 1; testDelay--) {
+    Serial.print("Testing delay: ");
+    Serial.print(testDelay);
+    Serial.print("ms ... ");
+
+    // Run steps at this speed
+    for (int i = 0; i < testSteps; i++) {
+      stepIndex = (stepIndex + 1) % 8;
+      setStep(stepIndex);
+      delay(testDelay);
+    }
+
+    Serial.print("RPM: ~");
+    // Calculate approximate RPM: (1000ms/delay) * 60sec / 4096 steps per rev
+    float rpm = (1000.0 / testDelay) * 60.0 / 4096.0;
+    Serial.println(rpm, 1);
+
+    delay(500);  // Pause between tests
+  }
+
+  // Also test sub-millisecond with microseconds
+  Serial.println();
+  Serial.println("Testing microsecond delays...");
+
+  int microDelays[] = {900, 800, 700, 600, 500};
+  for (int d = 0; d < 5; d++) {
+    Serial.print("Testing delay: ");
+    Serial.print(microDelays[d]);
+    Serial.print("us ... ");
+
+    for (int i = 0; i < testSteps; i++) {
+      stepIndex = (stepIndex + 1) % 8;
+      setStep(stepIndex);
+      delayMicroseconds(microDelays[d]);
+    }
+
+    float rpm = (1000000.0 / microDelays[d]) * 60.0 / 4096.0;
+    Serial.print("RPM: ~");
+    Serial.println(rpm, 1);
+
+    delay(500);
+  }
+
+  motorOff();
+  Serial.println();
+  Serial.println("=== Test Complete ===");
+  Serial.println("Use the fastest delay where motor ran smoothly.");
+  Serial.println("Update STEP_DELAY_MS in the code with that value.");
 }
 
 /**
