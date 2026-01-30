@@ -1,7 +1,8 @@
 /*
  * Splitflap Display Controller
  *
- * Controls a stepper motor to flip cards until desired character is reached.
+ * Controls a 28BYJ-48 stepper motor with ULN2003 driver to flip cards
+ * until desired character is reached.
  * Uses a magnetic hall-effect sensor on pin D4 for home position detection.
  * Home position (sensor LOW) corresponds to character position 2.
  *
@@ -10,44 +11,66 @@
 
 // Pin Definitions
 #define HALL_SENSOR_PIN   4    // Magnetic sensor - reads LOW at home position
-#define MOTOR_STEP_PIN    8    // Stepper motor step pin
-#define MOTOR_DIR_PIN     9    // Stepper motor direction pin
-#define MOTOR_ENABLE_PIN  10   // Stepper motor enable pin (active LOW)
+
+// 28BYJ-48 with ULN2003 driver - 4 control pins
+#define MOTOR_PIN_1       6    // IN1 on ULN2003
+#define MOTOR_PIN_2       7    // IN2 on ULN2003
+#define MOTOR_PIN_3       8    // IN3 on ULN2003
+#define MOTOR_PIN_4       9    // IN4 on ULN2003
 
 // Configuration
-#define STEPS_PER_FLAP    48   // Steps needed to advance one flap (adjust for your motor/gear ratio)
+// 28BYJ-48: 2048 steps per revolution (half-step mode)
+// Adjust STEPS_PER_FLAP based on your gear ratio to the flap drum
+#define STEPS_PER_REVOLUTION  2048
+#define STEPS_PER_FLAP    51   // Steps needed to advance one flap (2048/40 flaps ~ 51)
 #define NUM_FLAPS         40   // Total number of flaps/characters on the drum
 #define HOME_POSITION     2    // Character position when hall sensor reads LOW
-#define STEP_DELAY_US     1500 // Microseconds between steps (controls speed)
+#define STEP_DELAY_MS     2    // Milliseconds between steps (controls speed, min ~2ms for 28BYJ-48)
 
 // Character set - customize to match your flap order
 const char CHARACTERS[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-?!";
 const int NUM_CHARACTERS = sizeof(CHARACTERS) - 1;
 
+// Half-step sequence for 28BYJ-48 (8 steps)
+const int STEP_SEQUENCE[8][4] = {
+  {1, 0, 0, 0},
+  {1, 1, 0, 0},
+  {0, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 0},
+  {0, 0, 1, 1},
+  {0, 0, 0, 1},
+  {1, 0, 0, 1}
+};
+
 // State variables
 int currentPosition = -1;  // Current flap position (-1 = unknown/not homed)
 bool isHomed = false;
+int stepIndex = 0;         // Current position in step sequence
 
 void setup() {
   Serial.begin(115200);
 
-  // Configure pins
+  // Configure hall sensor pin
   pinMode(HALL_SENSOR_PIN, INPUT_PULLUP);
-  pinMode(MOTOR_STEP_PIN, OUTPUT);
-  pinMode(MOTOR_DIR_PIN, OUTPUT);
-  pinMode(MOTOR_ENABLE_PIN, OUTPUT);
 
-  // Disable motor initially
-  digitalWrite(MOTOR_ENABLE_PIN, HIGH);
-  digitalWrite(MOTOR_STEP_PIN, LOW);
-  digitalWrite(MOTOR_DIR_PIN, HIGH);  // Forward direction
+  // Configure motor pins
+  pinMode(MOTOR_PIN_1, OUTPUT);
+  pinMode(MOTOR_PIN_2, OUTPUT);
+  pinMode(MOTOR_PIN_3, OUTPUT);
+  pinMode(MOTOR_PIN_4, OUTPUT);
+
+  // Turn off all motor coils initially
+  motorOff();
 
   Serial.println("Splitflap Controller Ready");
+  Serial.println("Motor: 28BYJ-48 with ULN2003");
   Serial.println("Commands:");
   Serial.println("  H - Home the display");
   Serial.println("  G<char> - Go to character (e.g., GA for 'A')");
   Serial.println("  P<num> - Go to position number (e.g., P5)");
   Serial.println("  S - Show current status");
+  Serial.println("  T - Test motor (one full revolution)");
   Serial.println();
 
   // Auto-home on startup
@@ -89,6 +112,11 @@ void loop() {
         showStatus();
         break;
 
+      case 'T':
+      case 't':
+        testMotor();
+        break;
+
       case '\n':
       case '\r':
         // Ignore newlines
@@ -111,27 +139,79 @@ bool isAtHome() {
 }
 
 /**
- * Step the motor one step
+ * Turn off all motor coils (saves power, reduces heat)
  */
-void stepMotor() {
-  digitalWrite(MOTOR_STEP_PIN, HIGH);
-  delayMicroseconds(STEP_DELAY_US / 2);
-  digitalWrite(MOTOR_STEP_PIN, LOW);
-  delayMicroseconds(STEP_DELAY_US / 2);
+void motorOff() {
+  digitalWrite(MOTOR_PIN_1, LOW);
+  digitalWrite(MOTOR_PIN_2, LOW);
+  digitalWrite(MOTOR_PIN_3, LOW);
+  digitalWrite(MOTOR_PIN_4, LOW);
+}
+
+/**
+ * Set motor coils to current step in sequence
+ */
+void setStep(int step) {
+  digitalWrite(MOTOR_PIN_1, STEP_SEQUENCE[step][0]);
+  digitalWrite(MOTOR_PIN_2, STEP_SEQUENCE[step][1]);
+  digitalWrite(MOTOR_PIN_3, STEP_SEQUENCE[step][2]);
+  digitalWrite(MOTOR_PIN_4, STEP_SEQUENCE[step][3]);
+}
+
+/**
+ * Step the motor one step forward
+ */
+void stepMotorForward() {
+  stepIndex = (stepIndex + 1) % 8;
+  setStep(stepIndex);
+  delay(STEP_DELAY_MS);
+}
+
+/**
+ * Step the motor one step backward
+ */
+void stepMotorBackward() {
+  stepIndex = (stepIndex - 1 + 8) % 8;
+  setStep(stepIndex);
+  delay(STEP_DELAY_MS);
+}
+
+/**
+ * Move motor by specified number of steps
+ * Positive = forward, Negative = backward
+ */
+void moveSteps(int steps) {
+  if (steps > 0) {
+    for (int i = 0; i < steps; i++) {
+      stepMotorForward();
+    }
+  } else {
+    for (int i = 0; i < -steps; i++) {
+      stepMotorBackward();
+    }
+  }
 }
 
 /**
  * Advance the drum by one flap position
  */
 void advanceOneFlap() {
-  for (int i = 0; i < STEPS_PER_FLAP; i++) {
-    stepMotor();
-  }
+  moveSteps(STEPS_PER_FLAP);
 
   // Update position tracking
   if (currentPosition >= 0) {
     currentPosition = (currentPosition + 1) % NUM_FLAPS;
   }
+}
+
+/**
+ * Test motor - one full revolution
+ */
+void testMotor() {
+  Serial.println("Testing motor - one full revolution...");
+  moveSteps(STEPS_PER_REVOLUTION);
+  motorOff();
+  Serial.println("Test complete.");
 }
 
 /**
@@ -141,16 +221,10 @@ void advanceOneFlap() {
 void homeDisplay() {
   Serial.println("Homing display...");
 
-  // Enable motor
-  digitalWrite(MOTOR_ENABLE_PIN, LOW);
-  delay(10);
-
   // If already at home, move away first
   if (isAtHome()) {
     Serial.println("Already at home sensor, moving away...");
-    for (int i = 0; i < STEPS_PER_FLAP * 2; i++) {
-      stepMotor();
-    }
+    moveSteps(STEPS_PER_FLAP * 2);
   }
 
   // Search for home position (max 2 full rotations)
@@ -165,15 +239,15 @@ void homeDisplay() {
       found = true;
       break;
     }
-    stepMotor();
+    stepMotorForward();
     stepCount++;
   }
 
   if (found) {
-    // Continue stepping until we exit the sensor zone, then back up to center
+    // Continue stepping until we exit the sensor zone
     int sensorSteps = 0;
     while (isAtHome() && sensorSteps < STEPS_PER_FLAP) {
-      stepMotor();
+      stepMotorForward();
       sensorSteps++;
     }
 
@@ -193,8 +267,8 @@ void homeDisplay() {
     currentPosition = -1;
   }
 
-  // Disable motor when done
-  digitalWrite(MOTOR_ENABLE_PIN, HIGH);
+  // Turn off motor coils when done
+  motorOff();
 }
 
 /**
@@ -212,7 +286,7 @@ void goToPosition(int targetPosition) {
     return;
   }
 
-  // Calculate steps needed (always move forward)
+  // Calculate flaps needed (always move forward)
   int flapsToMove = (targetPosition - currentPosition + NUM_FLAPS) % NUM_FLAPS;
 
   if (flapsToMove == 0) {
@@ -228,10 +302,6 @@ void goToPosition(int targetPosition) {
   Serial.print(flapsToMove);
   Serial.println(" flaps)");
 
-  // Enable motor
-  digitalWrite(MOTOR_ENABLE_PIN, LOW);
-  delay(10);
-
   // Move the required number of flaps
   for (int i = 0; i < flapsToMove; i++) {
     advanceOneFlap();
@@ -245,11 +315,11 @@ void goToPosition(int targetPosition) {
       flapsToMove = i + 1 + remaining;
     }
 
-    delay(50);  // Small delay between flaps for smoother motion
+    delay(20);  // Small delay between flaps for smoother motion
   }
 
-  // Disable motor
-  digitalWrite(MOTOR_ENABLE_PIN, HIGH);
+  // Turn off motor coils
+  motorOff();
 
   currentPosition = targetPosition;
   Serial.print("Arrived at position ");
@@ -297,6 +367,8 @@ void goToCharacter(char c) {
  */
 void showStatus() {
   Serial.println("=== Status ===");
+  Serial.print("Motor: 28BYJ-48 (pins D6,D7,D8,D9)");
+  Serial.println();
   Serial.print("Homed: ");
   Serial.println(isHomed ? "Yes" : "No");
   Serial.print("Current position: ");
@@ -310,6 +382,8 @@ void showStatus() {
   }
   Serial.print("Hall sensor (D4): ");
   Serial.println(isAtHome() ? "HOME (LOW)" : "Not at home (HIGH)");
+  Serial.print("Steps per flap: ");
+  Serial.println(STEPS_PER_FLAP);
   Serial.print("Total characters: ");
   Serial.println(NUM_CHARACTERS);
   Serial.print("Character set: ");
